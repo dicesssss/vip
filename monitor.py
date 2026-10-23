@@ -17,6 +17,7 @@ from .accounts import AccStatus
 from .checker import CheckResult, State
 from .errors import Category, ErrorInfo
 from .timeutil import fmt_time, utcnow, now_iso
+from .claim import change_username, ClaimOutcome
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +35,7 @@ class Monitor:
     def __init__(self, *, repo: Any, manager: Any, checker: Any, notifier: Any, tz: Any = None,
                  min_interval: int = 5, max_interval: int = 3600, idle_poll: float = 5.0,
                  mono: Callable[[], float] = time.monotonic,
-                 availability_markup: Optional[Callable[[str], Any]] = None,
-                 claim_handler: Optional[Callable[[Any, str], Any]] = None) -> None:
+                 availability_markup: Optional[Callable[[str], Any]] = None) -> None:
         self.repo = repo
         self.manager = manager
         self.checker = checker
@@ -46,7 +46,6 @@ class Monitor:
         self.idle_poll = idle_poll
         self._mono = mono
         self._markup = availability_markup
-        self.claim_handler = claim_handler
         self.status = MonitorStatus.STOPPED
         self._task: Optional[asyncio.Task] = None
         self._wake = asyncio.Event()
@@ -137,7 +136,7 @@ class Monitor:
                     continue
                 waiting_since = None
 
-                # Rotate through the active runners (up to 5 accounts) with 10s gap
+                # Rotate through active runners (up to 5 accounts) with 10s gap
                 for index, runner in enumerate(runners):
                     target = await self.repo.get_current_target()
                     if target is None:
@@ -156,7 +155,7 @@ class Monitor:
                     await self._record(target, runner, result, elapsed_seconds)
 
                     if result.state is State.AVAILABLE:
-                        log.info(f"Username @{target['username']} claimed successfully! Stopping monitor.")
+                        log.info(f"Username @{target['username']} secured! Stopping monitor.")
                         await self.repo.set_bool("monitoring_enabled", False)
                         self.status = MonitorStatus.STOPPED
                         return
@@ -209,35 +208,29 @@ class Monitor:
             await self.repo.add_history(target["id"], result.state.value, result.detail[:300], runner.account_id)
 
         if became_available:
-            # AUTO-CLAIM ON SELF: Try setting the username directly on the account itself
-            claimed = False
-            claim_error = ""
+            # AUTO-CLAIM ON SELF USING claim.py change_username function
+            claim_success = False
+            claim_msg = ""
             try:
-                if self.claim_handler:
-                    claimed = await self.claim_handler(runner, target["username"])
-                else:
-                    # Fallback direct method call on runner/client if available
-                    if hasattr(runner, "set_username"):
-                        claimed = await runner.set_username(target["username"])
-                    elif hasattr(runner, "client") and hasattr(runner.client, "set_username"):
-                        await runner.client.set_username(target["username"])
-                        claimed = True
+                claim_result = await change_username(runner, runner.account_id, target["username"])
+                claim_success = claim_result.ok
+                claim_msg = claim_result.message
             except Exception as e:
-                claim_error = str(e)
+                claim_msg = str(e)
                 log.exception(f"Failed to auto-claim username on account {runner.account_id}")
 
-            await self._notify_acquired(target["username"], elapsed_seconds, claimed, claim_error, runner.safe_id)
+            await self._notify_acquired(target["username"], elapsed_seconds, claim_success, claim_msg, runner.safe_id)
 
         elif became_unavailable_from_available:
             await self.notifier.send(
                 f"🔴 <b>@{html.escape(target['username'])}</b> is no longer available "
                 f"(taken or withdrawn) as of {fmt_time(now, self.tz)}.")
 
-    async def _notify_acquired(self, username: str, elapsed_seconds: float, claimed: bool, error_detail: str, account_label: str) -> None:
+    async def _notify_acquired(self, username: str, elapsed_seconds: float, claimed: bool, message: str, account_label: str) -> None:
         mins, secs = divmod(int(elapsed_seconds), 60)
-        time_str = f"{mins}m {secs}s" if mins > f"{secs}s"[0] else f"{elapsed_seconds:.2f} seconds"
+        time_str = f"{mins}m {secs}s" if mins > 0 else f"{elapsed_seconds:.2f} seconds"
         
-        status_text = "✅ <b>Successfully Claimed on Account!</b>" if claimed else f"⚠️ <b>Available, but claim failed:</b> {html.escape(error_detail)}"
+        status_text = f"✅ <b>Auto-Claim Result:</b> {html.escape(message)}" if claimed else f"⚠️ <b>Available, but claim issue:</b> {html.escape(message)}"
         
         text = (
             f"🟢 <b>@{html.escape(username)} was AVAILABLE!</b>\n"
@@ -262,7 +255,7 @@ class Monitor:
         info = ErrorInfo(Category.CONNECTION, f"Monitoring paused: {reason}. Add or fix accounts.")
         await self.notifier.notify_error(account_label=getattr(runner, "safe_id", None),
                                          account_id=getattr(runner, "account_id", None), op="monitor",
-                                         info=info, status=self.status.value)
+                               annel=info, status=self.status.value)
 
     async def _report_unexpected(self, exc: BaseException) -> None:
         from .errors import classify
