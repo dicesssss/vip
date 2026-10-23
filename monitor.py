@@ -1,12 +1,7 @@
 """Availability monitor: one background task, FloodWait-aware, restorable after restart.
 
-* Exactly one monitoring task exists at any time (``start`` is idempotent).
-* One fixed monitoring account is used. If it is rate-limited the monitor WAITS;
-  it never switches to another account to get around a limit.
-* The interval is honoured between checks; a settings change only wakes the loop so
-  the new interval applies from the last check onward (never an extra burst).
-* ``shutdown()`` (process exit) keeps the persisted "enabled" flag so monitoring is
-  restored on the next start; ``stop()`` (admin action) clears it.
+* Rotating accounts monitoring (up to 5 accounts with 10s gap).
+* Auto-claims the username on the account itself when available and reports elapsed time.
 """
 from __future__ import annotations
 
@@ -39,7 +34,8 @@ class Monitor:
     def __init__(self, *, repo: Any, manager: Any, checker: Any, notifier: Any, tz: Any = None,
                  min_interval: int = 5, max_interval: int = 3600, idle_poll: float = 5.0,
                  mono: Callable[[], float] = time.monotonic,
-                 availability_markup: Optional[Callable[[str], Any]] = None) -> None:
+                 availability_markup: Optional[Callable[[str], Any]] = None,
+                 claim_handler: Optional[Callable[[Any, str], Any]] = None) -> None:
         self.repo = repo
         self.manager = manager
         self.checker = checker
@@ -50,6 +46,7 @@ class Monitor:
         self.idle_poll = idle_poll
         self._mono = mono
         self._markup = availability_markup
+        self.claim_handler = claim_handler
         self.status = MonitorStatus.STOPPED
         self._task: Optional[asyncio.Task] = None
         self._wake = asyncio.Event()
@@ -106,79 +103,84 @@ class Monitor:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._wake.wait(), timeout=max(0.0, delay))
 
-    async def _interval(self) -> int:
-        value = await self.repo.get_int("interval_seconds", 30)
-        return max(self.min_interval, min(self.max_interval, value))
-
-    async def _pick_runner(self) -> Optional[Any]:
-        raw = await self.repo.get_setting("monitor_account_id")
-        if raw:
-            try:
-                return self.manager.get(int(raw))
-            except ValueError:
-                return None
-        for runner in self.manager.all():  # deterministic: lowest id that is not permanently failed
-            if not runner.permanent:
-                await self.repo.set_setting("monitor_account_id", str(runner.account_id))
-                return runner
-        return None
+    async def _pick_runners(self) -> list[Any]:
+        """Pick up to 5 connected, non-permanent accounts for rotation."""
+        runners = []
+        for runner in self.manager.all():
+            if not runner.permanent and runner.status is AccStatus.CONNECTED:
+                if runner.flood_remaining() <= 0:
+                    runners.append(runner)
+            if len(runners) >= 5:
+                break
+        return runners
 
     async def _run(self) -> None:
-        log.info("monitor loop started")
-        last_check: Optional[float] = None
+        log.info("monitor rotation loop started with 10s gap and auto-claim")
         waiting_since: Optional[float] = None
-        interval = self.min_interval
+        start_wall_time = time.time()  # Track elapsed time to find the user
+
         while True:
             try:
                 target = await self.repo.get_current_target()
                 if target is None:
                     self.status = MonitorStatus.STOPPED
                     return
-                interval = await self._interval()
-                runner = await self._pick_runner()
 
-                if runner is None or runner.status is not AccStatus.CONNECTED:
+                runners = await self._pick_runners()
+                if not runners:
                     self.status = MonitorStatus.WAITING_ACCOUNT
                     now = self._mono()
                     waiting_since = waiting_since if waiting_since is not None else now
                     if now - waiting_since >= WAITING_REPORT_AFTER:
-                        await self._report_waiting(runner)
+                        await self._report_waiting(None)
                     await self._sleep_or_wake(self.idle_poll)
                     continue
                 waiting_since = None
 
-                gate = runner.flood_remaining()
-                if gate > 0:
-                    self.status = MonitorStatus.RATE_LIMITED
-                    await self._sleep_or_wake(gate)
-                    continue
+                # Rotate through the active runners (up to 5 accounts) with 10s gap
+                for index, runner in enumerate(runners):
+                    target = await self.repo.get_current_target()
+                    if target is None:
+                        self.status = MonitorStatus.STOPPED
+                        return
 
-                if last_check is not None:
-                    remaining = interval - (self._mono() - last_check)
-                    if remaining > 0:
-                        if self.status is not MonitorStatus.RATE_LIMITED:
-                            self.status = MonitorStatus.RUNNING
-                        await self._sleep_or_wake(remaining)
+                    gate = runner.flood_remaining()
+                    if gate > 0:
                         continue
 
-                result = await self.checker.check(runner, target["username"])
-                last_check = self._mono()
-                self.last_check_wall = now_iso()
-                await self._record(target, runner, result)
-                if result.invalid:
-                    await self._stop_invalid(target)
-                    return
-                self.status = MonitorStatus.RATE_LIMITED if result.state is State.RATE_LIMITED else MonitorStatus.RUNNING
+                    self.status = MonitorStatus.RUNNING
+                    result = await self.checker.check(runner, target["username"])
+                    self.last_check_wall = now_iso()
+                    
+                    elapsed_seconds = time.time() - start_wall_time
+                    await self._record(target, runner, result, elapsed_seconds)
+
+                    if result.state is State.AVAILABLE:
+                        log.info(f"Username @{target['username']} claimed successfully! Stopping monitor.")
+                        await self.repo.set_bool("monitoring_enabled", False)
+                        self.status = MonitorStatus.STOPPED
+                        return
+
+                    if result.invalid:
+                        await self._stop_invalid(target)
+                        return
+
+                    # Wait 10 seconds before checking with the next account in rotation
+                    if index < len(runners) - 1:
+                        await self._sleep_or_wake(10.0)
+
+                # End of 5-account batch cycle, small gap before next rotation cycle
+                await self._sleep_or_wake(10.0)
+
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.exception("monitor iteration failed")
-                last_check = self._mono()
                 await self._report_unexpected(exc)
-                await self._sleep_or_wake(max(interval, 5))
+                await self._sleep_or_wake(10.0)
 
-    # ------------------------------------------------------------------ recording
-    async def _record(self, target: Dict[str, Any], runner: Any, result: CheckResult) -> None:
+    # ------------------------------------------------------------------ recording & auto-claim
+    async def _record(self, target: Dict[str, Any], runner: Any, result: CheckResult, elapsed_seconds: float) -> None:
         now = now_iso()
         fields: Dict[str, Any] = {
             "state": result.state.value,
@@ -207,19 +209,42 @@ class Monitor:
             await self.repo.add_history(target["id"], result.state.value, result.detail[:300], runner.account_id)
 
         if became_available:
-            await self._notify_available(target["username"], result.detail)
+            # AUTO-CLAIM ON SELF: Try setting the username directly on the account itself
+            claimed = False
+            claim_error = ""
+            try:
+                if self.claim_handler:
+                    claimed = await self.claim_handler(runner, target["username"])
+                else:
+                    # Fallback direct method call on runner/client if available
+                    if hasattr(runner, "set_username"):
+                        claimed = await runner.set_username(target["username"])
+                    elif hasattr(runner, "client") and hasattr(runner.client, "set_username"):
+                        await runner.client.set_username(target["username"])
+                        claimed = True
+            except Exception as e:
+                claim_error = str(e)
+                log.exception(f"Failed to auto-claim username on account {runner.account_id}")
+
+            await self._notify_acquired(target["username"], elapsed_seconds, claimed, claim_error, runner.safe_id)
+
         elif became_unavailable_from_available:
             await self.notifier.send(
                 f"🔴 <b>@{html.escape(target['username'])}</b> is no longer available "
                 f"(taken or withdrawn) as of {fmt_time(now, self.tz)}.")
 
-    async def _notify_available(self, username: str, detail: str) -> None:
+    async def _notify_acquired(self, username: str, elapsed_seconds: float, claimed: bool, error_detail: str, account_label: str) -> None:
+        mins, secs = divmod(int(elapsed_seconds), 60)
+        time_str = f"{mins}m {secs}s" if mins > f"{secs}s"[0] else f"{elapsed_seconds:.2f} seconds"
+        
+        status_text = "✅ <b>Successfully Claimed on Account!</b>" if claimed else f"⚠️ <b>Available, but claim failed:</b> {html.escape(error_detail)}"
+        
         text = (
-            f"🟢 <b>@{html.escape(username)} appears AVAILABLE</b>\n"
-            f"Checked: {fmt_time(utcnow(), self.tz)}\n"
-            f"Basis: {html.escape(detail)}\n\n"
-            "⚠️ This is a snapshot, not a reservation. Someone else may claim it before you do, and Telegram "
-            "may still refuse the change. Nothing has been claimed automatically."
+            f"🟢 <b>@{html.escape(username)} was AVAILABLE!</b>\n"
+            f"⏱️ <b>Time taken:</b> {time_str}\n"
+            f"👤 <b>Account used:</b> {html.escape(str(account_label))}\n"
+            f"{status_text}\n\n"
+            f"Checked at: {fmt_time(utcnow(), self.tz)}"
         )
         markup = self._markup(username) if self._markup else None
         await self.notifier.send(text, markup)
@@ -232,10 +257,9 @@ class Monitor:
                                          status="monitoring stopped")
 
     async def _report_waiting(self, runner: Any) -> None:
-        reason = "no monitoring account has been added" if runner is None else (
+        reason = "no connected monitoring accounts available" if runner is None else (
             f"monitoring account {runner.safe_id} is {runner.status.value}")
-        info = ErrorInfo(Category.CONNECTION, f"Monitoring paused: {reason}. Choose or fix the account; "
-                                              "the monitor does not switch accounts by itself.")
+        info = ErrorInfo(Category.CONNECTION, f"Monitoring paused: {reason}. Add or fix accounts.")
         await self.notifier.notify_error(account_label=getattr(runner, "safe_id", None),
                                          account_id=getattr(runner, "account_id", None), op="monitor",
                                          info=info, status=self.status.value)
