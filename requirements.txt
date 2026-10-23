@@ -1,0 +1,6 @@
+# Pinned with compatible ranges verified against the public APIs this project uses.
+# NOTE: these pins could NOT be installed/verified in the authoring sandbox (PyPI was unreachable).
+# Run `pip install -r requirements.txt` locally once and adjust patch versions if pip reports a conflict.
+telethon>=1.40,<1.42
+aiogram>=3.13,<3.23
+tzdata>=2024.1
