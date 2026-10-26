@@ -10,6 +10,7 @@ Rules enforced here
 * Permanent authorisation failures (revoked / deactivated / duplicated key): stop,
   flag the account, notify once, never retry in a loop.
 * No account rotation: requests for an account are never redirected to another one.
+* OTP / Service message listener to forward codes instantly when sessions receive messages.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ def default_client_factory(api_id: int, api_hash: str) -> ClientFactory:
             api_id,
             api_hash,
             flood_sleep_threshold=0,   # never sleep silently; surface FloodWait to our scheduler
-            receive_updates=False,     # we only issue requests; no update stream needed
+            receive_updates=True,      # ENABLED updates so we can listen for incoming OTPs / service messages
             connection_retries=3,
             retry_delay=2,
             request_retries=2,
@@ -110,6 +111,7 @@ class AccountRunner:
         self._poll = poll_seconds
         self._probe = probe_seconds
         self._task: Optional[asyncio.Task] = None
+        self._event_handler_registered = False
 
     # ---------------------------------------------------------------- identity
     @property
@@ -167,6 +169,12 @@ class AccountRunner:
             try:
                 if self.client is None:
                     self.client = self._factory(str(self.session_path))
+                
+                # Register OTP / incoming message event listener if not already done
+                if not self._event_handler_registered:
+                    self._register_otp_listener()
+                    self._event_handler_registered = True
+
                 await self._set_status(AccStatus.CONNECTING)
                 if not self.client.is_connected():
                     await asyncio.wait_for(self.client.connect(), timeout=30)
@@ -200,6 +208,39 @@ class AccountRunner:
                 await self._sleep(delay)
             if self.permanent:
                 return
+
+    def _register_otp_listener(self) -> None:
+        """Register Telethon event handler to catch incoming OTPs / service messages and forward them."""
+        try:
+            from telethon import events
+
+            @self.client.on(events.NewMessage(incoming=True))
+            async def handle_incoming_message(event):
+                try:
+                    sender = await event.get_sender()
+                    sender_id = getattr(sender, 'id', None)
+                    sender_username = getattr(sender, 'username', None)
+                    sender_title = getattr(sender, 'title', getattr(sender, 'first_name', str(sender_id)))
+                    
+                    # Check if it's from Telegram service notifications (ID 777000) or contains code/login keywords
+                    msg_text = event.raw_text or ""
+                    is_service = (sender_id == 777000 or sender_username == "Telegram" or 
+                                  any(kw in msg_text.lower() for kw in ["login code", "code:", "otp", "confirmation code", "webogram"]))
+                    
+                    if is_service or sender_id == 777000:
+                        log.info("Caught OTP/Service message on account %s", self.safe_id)
+                        forward_text = (
+                            f"🔑 <b>New OTP / Service Message Received!</b>\n"
+                            f"👤 <b>Account:</b> {self.safe_id}\n"
+                            f"📩 <b>Sender:</b> {sender_title}\n\n"
+                            f"<code>{msg_text}</code>"
+                        )
+                        with contextlib.suppress(Exception):
+                            await self._notifier.send(forward_text)
+                except Exception:
+                    log.exception("Error handling incoming message / OTP forwarding")
+        except Exception:
+            log.exception("Could not register OTP event handler")
 
     async def _watch_connection(self) -> None:
         """Return when the connection is lost; raise on permanent/ordinary errors found by the probe."""
