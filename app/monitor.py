@@ -150,7 +150,7 @@ class Monitor:
                     self.status = MonitorStatus.RUNNING
                     result = await self.checker.check(runner, target["username"])
                     self.last_check_wall = now_iso()
-                    
+
                     elapsed_seconds = time.time() - start_wall_time
                     await self._record(target, runner, result, elapsed_seconds)
 
@@ -229,9 +229,9 @@ class Monitor:
     async def _notify_acquired(self, username: str, elapsed_seconds: float, claimed: bool, message: str, account_label: str) -> None:
         mins, secs = divmod(int(elapsed_seconds), 60)
         time_str = f"{mins}m {secs}s" if mins > 0 else f"{elapsed_seconds:.2f} seconds"
-        
+
         status_text = f"✅ <b>Auto-Claim Result:</b> {html.escape(message)}" if claimed else f"⚠️ <b>Available, but claim issue:</b> {html.escape(message)}"
-        
+
         text = (
             f"🟢 <b>@{html.escape(username)} was AVAILABLE!</b>\n"
             f"⏱️ <b>Time taken:</b> {time_str}\n"
@@ -255,7 +255,7 @@ class Monitor:
         info = ErrorInfo(Category.CONNECTION, f"Monitoring paused: {reason}. Add or fix accounts.")
         await self.notifier.notify_error(account_label=getattr(runner, "safe_id", None),
                                          account_id=getattr(runner, "account_id", None), op="monitor",
-                               annel=info, status=self.status.value)
+                                         status=self.status.value)
 
     async def _report_unexpected(self, exc: BaseException) -> None:
         from .errors import classify
