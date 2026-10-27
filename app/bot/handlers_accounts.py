@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from ..accounts import AccStatus
-from ..imports import ImportFailed, import_session_file, import_string_session
+from ..imports import ImportFailed, import_session_file, import_session_zip, import_string_session
 from ..login import LoginError, LoginFlow, LoginOutcome
 from ..validators import ValidationError, parse_phone
 from . import keyboards as kb
@@ -152,9 +152,10 @@ def register(router: Router, ctx: AppContext) -> None:
         await ctx.cancel_login()
         await state.set_state(ImportSession.payload)
         await show(cb,
-                   "📥 <b>Import session</b>\nSend either:\n"
-                   "• a Telethon <b>StringSession</b> as a text message, or\n"
-                   "• a Telethon <b>.session</b> file as a document.\n\n"
+                   "📥 <b>Import session</b>\nSend one of:\n"
+                   "• a Telethon <b>StringSession</b> as a text message,\n"
+                   "• a Telethon <b>.session</b> file as a document, or\n"
+                   "• a <b>.zip</b> file containing exactly one .session file.\n\n"
                    "Treat it like a password: anyone holding it controls the account. "
                    "Your message is deleted as soon as it is received, and the secret is never logged or echoed.\n"
                    "Best results: the session should have been created with the same API_ID/API_HASH this app uses.",
@@ -178,11 +179,17 @@ def register(router: Router, ctx: AppContext) -> None:
         doc = message.document
         if doc is None:
             return
-        if doc.file_size and doc.file_size > 1_000_000:
+        name = (doc.file_name or "").lower()
+        mime = doc.mime_type or ""
+        is_zip = name.endswith(".zip") or mime in {"application/zip", "application/x-zip-compressed"}
+        max_size = 5_000_000 if is_zip else 1_000_000
+        if doc.file_size and doc.file_size > max_size:
             await safe_delete(message)
-            await message.answer("❌ That file is too large to be a Telethon session.", reply_markup=kb.cancel())
+            kind = "zip file" if is_zip else "file"
+            await message.answer(f"❌ That {kind} is too large.", reply_markup=kb.cancel())
             return
-        dest = ctx.cfg.pending_dir / f"upload_{uuid.uuid4().hex}.session"
+        suffix = ".zip" if is_zip else ".session"
+        dest = ctx.cfg.pending_dir / f"upload_{uuid.uuid4().hex}{suffix}"
         try:
             await ctx.bot.download(doc, destination=dest)
         except Exception as exc:  # noqa: BLE001
@@ -190,9 +197,9 @@ def register(router: Router, ctx: AppContext) -> None:
             await message.answer("❌ Could not download that file from Telegram.", reply_markup=kb.cancel())
             return
         finally:
-            await safe_delete(message)  # the chat copy of the session file is removed either way
+            await safe_delete(message)  # the chat copy of the session file (or zip) is removed either way
         try:
-            runner = await import_session_file(ctx.manager, dest)
+            runner = await (import_session_zip(ctx.manager, dest) if is_zip else import_session_file(ctx.manager, dest))
         except ImportFailed as exc:
             await message.answer(f"❌ {exc}", reply_markup=kb.cancel())
             return
