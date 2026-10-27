@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,8 @@ log = logging.getLogger(__name__)
 
 NET_TIMEOUT = 30.0
 MAX_SESSION_FILE_BYTES = 1_000_000
+MAX_ZIP_FILE_BYTES = 5_000_000
+MAX_ZIP_UNCOMPRESSED_BYTES = 5_000_000
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
 
@@ -103,3 +106,64 @@ async def import_session_file(manager: AccountManager, uploaded: Path) -> Accoun
     with contextlib.suppress(OSError):
         uploaded.chmod(0o600)
     return await _validate_and_register(manager, uploaded)
+
+
+def _safe_zip_member(name: str) -> bool:
+    """Reject absolute paths and '..' segments (zip-slip protection)."""
+    if name.startswith("/") or name.startswith("\\"):
+        return False
+    return ".." not in Path(name).parts
+
+
+async def import_session_zip(manager: AccountManager, zip_path: Path) -> AccountRunner:
+    """Extract the single .session file inside an uploaded zip, then import it as usual.
+
+    ``zip_path`` must already be inside the pending directory (the caller downloads it there).
+    The zip itself is deleted once the session is extracted, win or lose.
+    """
+    extracted: Path | None = None
+    try:
+        try:
+            if zip_path.stat().st_size > MAX_ZIP_FILE_BYTES:
+                raise ImportFailed("That zip file is too large.")
+            with zipfile.ZipFile(zip_path) as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise ImportFailed("That zip is corrupted.")
+                members = [i for i in zf.infolist() if not i.is_dir()]
+                total = sum(i.file_size for i in members)
+                if total > MAX_ZIP_UNCOMPRESSED_BYTES:
+                    raise ImportFailed("That zip is too large once extracted.")
+                unsafe = [i for i in members if not _safe_zip_member(i.filename)]
+                if unsafe:
+                    raise ImportFailed("That zip contains unsafe file paths and was rejected.")
+                candidates = [i for i in members if i.filename.lower().endswith(".session")]
+                if not candidates:
+                    raise ImportFailed(
+                        "No .session file was found inside that zip. Make sure the zip directly "
+                        "contains a Telethon .session file."
+                    )
+                if len(candidates) > 1:
+                    raise ImportFailed(
+                        "That zip contains more than one .session file. Upload a zip with just the "
+                        "one account you want to import, or send the .session file directly."
+                    )
+                member = candidates[0]
+                if member.file_size > MAX_SESSION_FILE_BYTES:
+                    raise ImportFailed("The session file inside the zip is too large.")
+                extracted = manager.new_pending_path()
+                with zf.open(member) as src, open(extracted, "wb") as dst:
+                    dst.write(src.read(MAX_SESSION_FILE_BYTES + 1))
+        except zipfile.BadZipFile as exc:
+            raise ImportFailed("That file is not a valid zip archive.") from exc
+        except ImportFailed:
+            raise
+        except OSError as exc:
+            raise ImportFailed("Could not read the uploaded zip.") from exc
+    except BaseException:
+        if extracted is not None:
+            _cleanup(extracted)
+        raise
+    finally:
+        _cleanup(zip_path)
+    return await import_session_file(manager, extracted)
