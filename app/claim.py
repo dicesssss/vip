@@ -39,25 +39,29 @@ class ClaimResult:
         return self.outcome is ClaimOutcome.SUCCESS
 
 
+async def describe_account(runner: Any) -> dict:
+    """Compatibility helper to fetch account details without errors."""
+    try:
+        me = await runner.fetch_me()
+        return {"id": int(me.id), "username": getattr(me, "username", None), "first_name": getattr(me, "first_name", None)}
+    except Exception:
+        return {"id": getattr(runner, "account_id", 0), "username": getattr(runner, "username", None), "first_name": None}
+
+
 async def _get_or_create_claiming_channel(runner: Any) -> int:
     """Finds an existing channel owned by this account or creates a new public channel automatically."""
     from telethon.tl.functions.channels import CreateChannelRequest
-    from telethon.tl.types import InputPeerChannel
 
     client = runner.client
     
-    # 📝 First, check if the runner already cached or has a channel we can use
-    # Or list dialogs to find a channel created by this bot previously
     try:
         async for dialog in client.iter_dialogs(limit=20):
             if dialog.is_channel and dialog.entity.creator:
-                # Check if it's a megagroup or channel, prefer channel
                 if getattr(dialog.entity, 'broadcast', False):
                     return dialog.id
     except Exception as exc:
         log.warning("Failed to iterate dialogs to find existing channel: %s", exc)
 
-    # 🚀 If no suitable channel exists, bot creates a fresh public channel automatically!
     try:
         result = await runner.request(
             "create_channel",
@@ -69,7 +73,6 @@ async def _get_or_create_claiming_channel(runner: Any) -> int:
         )
         for chat in result.chats:
             if getattr(chat, "id", None):
-                # Return negative channel ID format used by Telethon for channels (-100...)
                 return int(f"-100{chat.id}")
     except Exception as exc:
         log.exception("Failed to automatically create public channel: %s", exc)
@@ -89,7 +92,6 @@ async def change_username(runner: Any, expected_account_id: int, username_raw: s
         return ClaimResult(ClaimOutcome.INVALID, str(exc))
 
     try:
-        # Ensure account is connected
         if not runner.is_connected:
             await runner.connect()
     except AccountUnavailable as exc:
@@ -100,14 +102,10 @@ async def change_username(runner: Any, expected_account_id: int, username_raw: s
         return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"Could not connect account: {exc}")
 
     try:
-        # Get or automatically create the public channel for this account
         channel_id = await _get_or_create_claiming_channel(runner)
-        
-        # Resolve channel entity to input channel
         entity = await runner.client.get_entity(channel_id)
         input_channel = InputChannel(entity.id, entity.access_hash)
 
-        # Attempt to set the username on the public channel
         await runner.request(
             "update_channel_username",
             UpdateUsernameRequest(
