@@ -122,6 +122,37 @@ def flood_settings(notify_flood: bool, notify_errors: bool, events: List[Dict[st
     return "\n".join(lines)
 
 
+def stats_dashboard(*, uptime_seconds: float, counts: Dict[str, int], target: Optional[Dict[str, Any]],
+                    monitor_status: str, interval: int, active_runners_count: int, tz: Any = None) -> str:
+    """Professional performance and monitoring statistics dashboard."""
+    total_checks = target.get("checks_total") or 0 if target else 0
+    target_name = f"@{e(target['username'])}" if target else "None"
+    target_state = STATE_TEXT.get(target.get("state"), "Unknown") if target else "Not Set"
+
+    lines = [
+        "📊 <b>Performance & Activity Statistics</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"⏱️ <b>Uptime:</b> <code>{human_duration(uptime_seconds)}</code>",
+        f"🎯 <b>Target Username:</b> <b>{target_name}</b>",
+        f"📌 <b>Current Status:</b> {e(target_state)}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📈 <b>Execution Metrics:</b>",
+        f"  • Total Tries / Checks Run: <b>{total_checks}</b>",
+        f"  • Polling Interval: <b>{interval}s</b> (Rotating accounts)",
+        f"  • Monitor State: <b>{e(monitor_status)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "👥 <b>Account Fleet Status:</b>",
+        f"  • Total Accounts Loaded: <b>{counts['total']}</b>",
+        f"  • Active & Connected: 🟢 <b>{counts['connected']}</b>",
+        f"  • Rotating / Available: 🔄 <b>{active_runners_count}</b>",
+        f"  • Disconnected: 🔴 <b>{counts['disconnected']}</b>",
+        f"  • Permanently Failed: ⛔ <b>{counts.get('failed', 0)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"🕒 <i>Report generated at: {fmt_time(datetime.utcnow(), tz)}</i>",
+    ]
+    return "\n".join(lines)
+
+
 def status(*, version: str, uptime_seconds: float, counts: Dict[str, int], target: Optional[Dict[str, Any]],
            monitor_status: str, interval: int, monitor_account: Optional[str], last_check: Optional[str],
            floods: List[Dict[str, Any]], errors: List[Dict[str, Any]], storage: Dict[str, Any],
