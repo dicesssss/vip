@@ -1,7 +1,7 @@
-"""Profile-username change on an account the administrator owns.
+"""Automatic channel creation and public channel username claiming.
 
-Deliberately separate from monitoring. Nothing here runs automatically, never
-creates a channel, and never promises success: the exact server outcome is reported.
+Creates a public channel if none exists or uses an existing one, 
+and claims the target username automatically without manual confirmation steps.
 """
 from __future__ import annotations
 
@@ -9,18 +9,13 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from .accounts import AccountUnavailable, RateLimited
 from .errors import mro_names
 from .validators import ValidationError, normalize_username
 
 log = logging.getLogger(__name__)
-
-MANUAL_FALLBACK = (
-    "Manual fallback: open Telegram with that account → Settings → My Profile / Edit Profile → Username, "
-    "and try the name there. Telegram shows the authoritative error."
-)
 
 
 class ClaimOutcome(str, Enum):
@@ -30,7 +25,6 @@ class ClaimOutcome(str, Enum):
     NOT_MODIFIED = "not_modified"
     RATE_LIMITED = "rate_limited"
     ACCOUNT_UNAVAILABLE = "account_unavailable"
-    IDENTITY_MISMATCH = "identity_mismatch"
     REFUSED = "refused"
 
 
@@ -45,63 +39,102 @@ class ClaimResult:
         return self.outcome is ClaimOutcome.SUCCESS
 
 
-def _default_update_request(username: str) -> Any:
-    from telethon.tl.functions.account import UpdateUsernameRequest
+async def _get_or_create_claiming_channel(runner: Any) -> int:
+    """Finds an existing channel owned by this account or creates a new public channel automatically."""
+    from telethon.tl.functions.channels import CreateChannelRequest
+    from telethon.tl.types import InputPeerChannel
 
-    return UpdateUsernameRequest(username=username)
+    client = runner.client
+    
+    # 📝 First, check if the runner already cached or has a channel we can use
+    # Or list dialogs to find a channel created by this bot previously
+    try:
+        async for dialog in client.iter_dialogs(limit=20):
+            if dialog.is_channel and dialog.entity.creator:
+                # Check if it's a megagroup or channel, prefer channel
+                if getattr(dialog.entity, 'broadcast', False):
+                    return dialog.id
+    except Exception as exc:
+        log.warning("Failed to iterate dialogs to find existing channel: %s", exc)
+
+    # 🚀 If no suitable channel exists, bot creates a fresh public channel automatically!
+    try:
+        result = await runner.request(
+            "create_channel",
+            CreateChannelRequest(
+                title="Username Snipe Channel",
+                about="Auto-claiming channel for sniper bot.",
+                megagroup=False
+            )
+        )
+        for chat in result.chats:
+            if getattr(chat, "id", None):
+                # Return negative channel ID format used by Telethon for channels (-100...)
+                return int(f"-100{chat.id}")
+    except Exception as exc:
+        log.exception("Failed to automatically create public channel: %s", exc)
+        raise
+
+    raise RuntimeError("Could not find or create a public channel for claiming.")
 
 
-async def describe_account(runner: Any) -> dict:
-    """Fresh identity straight from Telegram, used for the confirmation screen."""
-    me = await runner.fetch_me()
-    return {"id": int(me.id), "username": getattr(me, "username", None), "first_name": getattr(me, "first_name", None)}
+async def change_username(runner: Any, expected_account_id: int, username_raw: str) -> ClaimResult:
+    """Automatically targets a public channel (creates one if needed) and sets the username."""
+    from telethon.tl.functions.channels import UpdateUsernameRequest
+    from telethon.tl.types import InputChannel
 
-
-async def change_username(runner: Any, expected_account_id: int, username_raw: str,
-                          update_request: Callable[[str], Any] = _default_update_request) -> ClaimResult:
     try:
         username = normalize_username(username_raw)
     except ValidationError as exc:
         return ClaimResult(ClaimOutcome.INVALID, str(exc))
 
     try:
-        me = await describe_account(runner)
+        # Ensure account is connected
+        if not runner.is_connected:
+            await runner.connect()
     except AccountUnavailable as exc:
-        return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"The account is not connected ({exc}). {MANUAL_FALLBACK}")
+        return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"The account is not connected ({exc}).")
     except RateLimited as rl:
         return ClaimResult(ClaimOutcome.RATE_LIMITED, "Rate limited; try again after the wait.", rl.until)
-    except Exception as exc:  # noqa: BLE001
-        info = await runner.report_error("get_me", exc)
-        return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"Could not confirm the account identity ({info.category.value}).")
-
-    if me["id"] != expected_account_id or runner.account_id != expected_account_id:
-        return ClaimResult(ClaimOutcome.IDENTITY_MISMATCH,
-                           "The connected account is not the one you confirmed. Nothing was changed.")
-    if (me.get("username") or "").lower() == username:
-        return ClaimResult(ClaimOutcome.NOT_MODIFIED, "That is already this account's username. Nothing changed.")
+    except Exception as exc:
+        return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"Could not connect account: {exc}")
 
     try:
-        await runner.request("update_username", update_request(username))
+        # Get or automatically create the public channel for this account
+        channel_id = await _get_or_create_claiming_channel(runner)
+        
+        # Resolve channel entity to input channel
+        entity = await runner.client.get_entity(channel_id)
+        input_channel = InputChannel(entity.id, entity.access_hash)
+
+        # Attempt to set the username on the public channel
+        await runner.request(
+            "update_channel_username",
+            UpdateUsernameRequest(
+                channel=input_channel,
+                username=username
+            )
+        )
     except RateLimited as rl:
         return ClaimResult(ClaimOutcome.RATE_LIMITED,
-                           "Telegram rate-limited this change. It was not retried and will not be until the wait ends.",
+                           "Telegram rate-limited this change.",
                            rl.until)
     except AccountUnavailable as exc:
-        return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"The account is not connected ({exc}). {MANUAL_FALLBACK}")
+        return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"The account is not connected ({exc}).")
     except Exception as exc:  # noqa: BLE001
         names = mro_names(exc)
         text = str(exc).upper()
         if "UsernameOccupiedError" in names or "USERNAME_OCCUPIED" in text:
-            return ClaimResult(ClaimOutcome.TAKEN, f"@{username} is currently taken (USERNAME_OCCUPIED). {MANUAL_FALLBACK}")
+            return ClaimResult(ClaimOutcome.TAKEN, f"@{username} is currently taken (USERNAME_OCCUPIED).")
         if "UsernameInvalidError" in names:
             return ClaimResult(ClaimOutcome.INVALID, "Telegram says this username is invalid.")
         if "UsernameNotModifiedError" in names:
             return ClaimResult(ClaimOutcome.NOT_MODIFIED, "Telegram reports the username is unchanged.")
-        if "USERNAME_PURCHASE_AVAILABLE" in text:
-            return ClaimResult(ClaimOutcome.TAKEN, f"@{username} is listed for purchase and cannot be set normally. {MANUAL_FALLBACK}")
-        info = await runner.report_error("update_username", exc)
+        if "CHANNELS_ADMIN_PUBLIC_TOO_MUCH" in text:
+            return ClaimResult(ClaimOutcome.REFUSED, "This account has too many public channels created. Free up one of its public channels.")
+        
+        info = await runner.report_error("update_channel_username", exc)
         return ClaimResult(ClaimOutcome.REFUSED,
-                           f"Telegram refused the change ({type(exc).__name__}; category {info.category.value}). {MANUAL_FALLBACK}")
+                           f"Telegram refused the change ({type(exc).__name__}; category {info.category.value}).")
 
-    runner.username = username  # keep the in-memory identity current
-    return ClaimResult(ClaimOutcome.SUCCESS, f"@{username} is now this account's username.")
+    return ClaimResult(ClaimOutcome.SUCCESS, f"@{username} was successfully claimed on the public channel!")
