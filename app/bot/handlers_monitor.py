@@ -36,7 +36,8 @@ def register(router: Router, ctx: AppContext) -> None:
             tgt, monitor_status=ctx.monitor.status.value,
             interval=await ctx.repo.get_int("interval_seconds", 30),
             account_label=await monitor_account_label(ctx), tz=tz)
-        await show(target, text, kb.target_card(ctx.monitor.running) if tgt else kb.home_only())
+        # Removed manual start button logic, keeping clean views
+        await show(target, text, kb.home_only() if not tgt else kb.refresh("target"))
 
     async def _register_target(target, raw: str) -> None:
         try:
@@ -49,15 +50,18 @@ def register(router: Router, ctx: AppContext) -> None:
         warn = ""
         if not ctx.manager.all():
             warn = "\n\n⚠️ No account is connected yet. Add one first; monitoring waits for it."
+        
+        # AUTOMATICALLY START MONITORING IMMEDIATELY UPON /SNIPE
         started = await ctx.monitor.restart() if ctx.monitor.running else await ctx.monitor.start()
         ctx.monitor.wake()
-        prefix = f"✅ Registered <b>@{username}</b> and {'started' if started else 'could not start'} monitoring.{warn}\n\n"
+        
+        prefix = f"✅ Registered and automatically started monitoring <b>@{username}</b>!{warn}\n\n"
         tgt = await ctx.repo.get_target(row["id"])
         text = prefix + views.target_card(
             tgt, monitor_status=ctx.monitor.status.value,
             interval=await ctx.repo.get_int("interval_seconds", 30),
             account_label=await monitor_account_label(ctx), tz=tz)
-        await show(target, text, kb.target_card(ctx.monitor.running))
+        await show(target, text, kb.home_only() if not tgt else kb.refresh("target"))
 
     # ------------------------------------------------------------------ /snipe
     @router.message(Command("snipe"))
@@ -89,25 +93,13 @@ def register(router: Router, ctx: AppContext) -> None:
     async def cmd_target(message: Message) -> None:
         await _target_view(message)
 
-    # ------------------------------------------------------------------ controls
-    @router.callback_query(Nav.filter(F.a == "start"))
-    async def cb_start(cb: CallbackQuery) -> None:
-        if not await ctx.monitor.start():
-            await cb.answer("Already running, or no target set.", show_alert=True)
-        await _target_view(cb)
-
+    # ------------------------------------------------------------------ controls (Manual start/restart removed)
     @router.callback_query(Nav.filter(F.a == "stop"))
     async def cb_stop(cb: CallbackQuery) -> None:
         await ctx.monitor.stop()
         await cb.answer("Monitoring stopped.")
         await _target_view(cb) if await ctx.repo.get_current_target() else await show(
             cb, "⏹ Monitoring is stopped. No target is set.", kb.home_only())
-
-    @router.callback_query(Nav.filter(F.a == "restart"))
-    async def cb_restart(cb: CallbackQuery) -> None:
-        if not await ctx.monitor.restart():
-            await cb.answer("No target set.", show_alert=True)
-        await _target_view(cb)
 
     @router.callback_query(Nav.filter(F.a == "hist"))
     async def cb_hist(cb: CallbackQuery) -> None:
@@ -168,64 +160,3 @@ def register(router: Router, ctx: AppContext) -> None:
         await ctx.repo.set_setting("monitor_account_id", str(runner.account_id))
         ctx.monitor.wake()
         await _settings_view(cb)
-
-    # ------------------------------------------------------------------ username change (manual, confirmed)
-    @router.callback_query(Nav.filter(F.a == "claim_pick"))
-    async def cb_claim_pick(cb: CallbackQuery, callback_data: Nav) -> None:
-        tgt = await ctx.repo.get_current_target()
-        if tgt is None:
-            await show(cb, "Set a target first with /snipe @username.", kb.home_only())
-            return
-        if callback_data.v:
-            await _claim_confirm(cb, int(callback_data.v), tgt["username"])
-            return
-        views_ = [r.view() for r in ctx.manager.all()]
-        if not views_:
-            await show(cb, "No accounts yet.", kb.home_only())
-            return
-        await show(cb, f"✏️ Which account should get <b>@{tgt['username']}</b>?\n"
-                       "Only accounts you own. Nothing happens until you confirm.",
-                   kb.account_picker(views_, "claim_pick"))
-
-    async def _claim_confirm(cb: CallbackQuery, account_id: int, username: str) -> None:
-        runner = ctx.manager.get(account_id)
-        if runner is None:
-            await show(cb, "That account no longer exists.", kb.home_only())
-            return
-        try:
-            me = await describe_account(runner)
-        except (AccountUnavailable, RateLimited) as exc:
-            await show(cb, f"Cannot confirm the account right now: {exc}", kb.home_only())
-            return
-        except Exception as exc:  # noqa: BLE001
-            info = await runner.report_error("get_me", exc)
-            await show(cb, f"Cannot confirm the account identity ({info.category.value}).", kb.home_only())
-            return
-        current = f"@{me['username']}" if me["username"] else "(no username)"
-        await show(
-            cb,
-            "⚠️ <b>Confirm username change</b>\n"
-            f"Account: <b>{runner.safe_id}</b> (verified live: {current})\n"
-            f"New public username: <b>@{username}</b>\n\n"
-            "This changes the account's public username. It does <b>not</b> create a channel. "
-            "Telegram decides the outcome; the exact response will be shown, and nothing is retried automatically.",
-            kb.claim_confirm(account_id))
-
-    @router.callback_query(Nav.filter(F.a == "claim_do"))
-    async def cb_claim_do(cb: CallbackQuery, callback_data: Nav) -> None:
-        tgt = await ctx.repo.get_current_target()
-        runner = ctx.manager.get(int(callback_data.v))
-        if tgt is None or runner is None:
-            await show(cb, "Target or account is gone. Nothing was changed.", kb.home_only())
-            return
-        result = await change_username(runner, runner.account_id, tgt["username"])
-        icon = "✅" if result.ok else "❌"
-        lines = [f"{icon} <b>{result.outcome.value}</b>", result.message]
-        if result.wait_until:
-            lines.append(f"Retry not before: {fmt_time(result.wait_until, tz)}")
-        if result.ok:
-            await ctx.repo.update_account_identity(runner.account_id, label=f"@{tgt['username']}",
-                                                   username=tgt["username"], first_name=runner.label)
-            await ctx.monitor.stop()
-            lines.append("Monitoring was stopped because the target is now yours.")
-        await show(cb, "\n".join(lines), kb.home_only())
