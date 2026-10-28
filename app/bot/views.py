@@ -22,7 +22,7 @@ e = html.escape
 
 def dashboard(admin_first_name: Optional[str] = None) -> str:
     who = f", {e(admin_first_name)}" if admin_first_name else ""
-    return f"🛰 <b>Username Monitor</b>\nWelcome{who}. Choose an action:"
+    return f"🛰 <b>Username Sniper</b>\nWelcome{who}. Choose an action:"
 
 
 def account_line(view: Dict[str, Any], tz: Any = None) -> str:
@@ -41,7 +41,7 @@ def account_list(views: List[Dict[str, Any]], tz: Any = None, monitor_account_id
         return "No accounts yet. Use <b>Add Account</b> or <b>Import Session</b>."
     lines = ["👥 <b>Accounts</b>"]
     for v in views:
-        mark = " 🎯 monitoring" if monitor_account_id == v["id"] else ""
+        mark = " 🎯 active" if monitor_account_id == v["id"] else ""
         lines.append(account_line(v, tz) + mark)
     return "\n\n".join([lines[0], "\n\n".join(lines[1:])])
 
@@ -52,7 +52,7 @@ def account_detail(view: Dict[str, Any], tz: Any = None, is_monitor: bool = Fals
         f"Status: {ACCOUNT_ICON.get(view['status'], '⚪')} {e(view['status'])}",
         f"Phone: {e(view.get('phone_hint') or '—')}",
         f"Last connected: {fmt_time(view.get('last_connected_at'), tz)}",
-        f"Used for monitoring: {'yes' if is_monitor else 'no'}",
+        f"Used for sniping: {'yes' if is_monitor else 'no'}",
     ]
     if view.get("detail"):
         lines.append(f"Detail: {e(str(view['detail'])[:160])}")
@@ -64,14 +64,14 @@ def account_detail(view: Dict[str, Any], tz: Any = None, is_monitor: bool = Fals
 def target_card(target: Optional[Dict[str, Any]], *, monitor_status: str, interval: int,
                 account_label: Optional[str], tz: Any = None) -> str:
     if target is None:
-        return "🎯 <b>No target set.</b>\nSend <code>/snipe @username</code> or use <b>Monitor Username</b>."
+        return "🎯 <b>No target set.</b>\nSend <code>/snipe @username</code>."
     state = target.get("state") or "unknown"
     lines = [
         f"🎯 <b>@{e(target['username'])}</b>",
         f"Latest check: {STATE_ICON.get(state, '⚪')} {STATE_TEXT.get(state, state)}",
         f"Last confirmed: {e(target.get('confirmed_state') or '—')}",
-        f"Monitoring: <b>{e(monitor_status)}</b> · every {interval}s",
-        f"Account: {e(account_label or 'none selected')}",
+        f"Sniping Status: <b>{e(monitor_status)}</b> · every {interval}s",
+        f"Active Account: {e(account_label or 'none selected')}",
         f"Last check: {fmt_time(target.get('last_check_at'), tz)}",
         f"Last success: {fmt_time(target.get('last_success_at'), tz)}",
         f"Checks run: {target.get('checks_total') or 0}",
@@ -79,7 +79,7 @@ def target_card(target: Optional[Dict[str, Any]], *, monitor_status: str, interv
     if target.get("last_error"):
         lines.append(f"Last error: <code>{e(str(target['last_error'])[:160])}</code>")
         lines.append(f"Error time: {fmt_time(target.get('last_error_at'), tz)}")
-    lines.append("\n<i>“Available” is a snapshot only; it is never a guarantee you can claim the name.</i>")
+    lines.append("\n<i>“Available” is a snapshot only; bot will auto-claim immediately when open.</i>")
     return "\n".join(lines)
 
 
@@ -96,12 +96,11 @@ def history(rows: List[Dict[str, Any]], username: str, tz: Any = None) -> str:
 
 def settings(interval: int, min_i: int, max_i: int, account_label: Optional[str]) -> str:
     return (
-        "⚙️ <b>Monitoring settings</b>\n"
-        f"Current interval: <b>{interval} s</b>\n"
-        f"Monitoring account: {e(account_label or 'none selected')}\n\n"
-        f"Allowed interval: {min_i}–{max_i} s. Telegram enforces its own limits (FloodWait); "
-        "shorter intervals do not make checks faster than the server allows, and the monitor "
-        "pauses for exactly the time Telegram prescribes. It never switches accounts to avoid a limit."
+        "⚙️ <b>Sniping settings</b>\n"
+        f"Current account rotation gap: <b>{interval} s</b>\n"
+        f"Active account: {e(account_label or 'none selected')}\n\n"
+        f"Allowed gap: {min_i}–{max_i} s. Telegram enforces its own limits (FloodWait); "
+        "bot rotates across your accounts maintaining this gap to check and snipe instantly upon availability."
     )
 
 
@@ -124,13 +123,13 @@ def flood_settings(notify_flood: bool, notify_errors: bool, events: List[Dict[st
 
 def stats_dashboard(*, uptime_seconds: float, counts: Dict[str, int], target: Optional[Dict[str, Any]],
                     monitor_status: str, interval: int, active_runners_count: int, tz: Any = None) -> str:
-    """Professional performance and monitoring statistics dashboard."""
+    """Professional performance and sniping statistics dashboard."""
     total_checks = target.get("checks_total") or 0 if target else 0
     target_name = f"@{e(target['username'])}" if target else "None"
     target_state = STATE_TEXT.get(target.get("state"), "Unknown") if target else "Not Set"
 
     lines = [
-        "📊 <b>Performance & Activity Statistics</b>",
+        "📊 <b>Performance & Sniping Statistics</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"⏱️ <b>Uptime:</b> <code>{human_duration(uptime_seconds)}</code>",
         f"🎯 <b>Target Username:</b> <b>{target_name}</b>",
@@ -138,8 +137,8 @@ def stats_dashboard(*, uptime_seconds: float, counts: Dict[str, int], target: Op
         "━━━━━━━━━━━━━━━━━━━━━━",
         "📈 <b>Execution Metrics:</b>",
         f"  • Total Tries / Checks Run: <b>{total_checks}</b>",
-        f"  • Polling Interval: <b>{interval}s</b> (Rotating accounts)",
-        f"  • Monitor State: <b>{e(monitor_status)}</b>",
+        f"  • Account Rotation Gap: <b>{interval}s</b>",
+        f"  • Sniper Status: <b>{e(monitor_status)}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "👥 <b>Account Fleet Status:</b>",
         f"  • Total Accounts Loaded: <b>{counts['total']}</b>",
@@ -166,7 +165,7 @@ def status(*, version: str, uptime_seconds: float, counts: Dict[str, int], targe
         f"Sessions: {counts['total']} total · {counts['connected']} connected · {counts['disconnected']} disconnected"
         + (f" · {counts['failed']} permanently failed" if counts.get("failed") else ""),
         f"Target: {('@' + e(target['username'])) if target else 'none'}",
-        f"Monitoring: <b>{e(monitor_status)}</b> · every {interval}s · account {e(monitor_account or '—')}",
+        f"Sniping: <b>{e(monitor_status)}</b> · every {interval}s · account {e(monitor_account or '—')}",
         f"Last check: {fmt_time(last_check, tz)}",
         "",
         f"Storage: {storage_line} · {free // (1024 * 1024)} MiB free · volume <code>{e(volume_id)}</code>",
@@ -187,6 +186,6 @@ REVOCATION_GUIDANCE = (
     "🔐 <b>Revoking the session on Telegram</b>\n"
     "Removing an account here deletes the saved session from this app's storage, but the login stays valid on "
     "Telegram's side until it is terminated. To revoke it: open Telegram with that account → "
-    "Settings → Devices → select “Username Monitor” → Terminate Session. "
+    "Settings → Devices → select “Username Sniper” → Terminate Session. "
     "You can also choose <b>Remove + log out</b>, which asks Telegram to end the session for you."
 )
