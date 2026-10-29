@@ -53,7 +53,7 @@ async def _get_or_create_claiming_channel(runner: Any) -> int:
     from telethon.tl.functions.channels import CreateChannelRequest
 
     client = runner.client
-    
+
     try:
         async for dialog in client.iter_dialogs(limit=20):
             if dialog.is_channel and dialog.entity.creator:
@@ -92,7 +92,8 @@ async def change_username(runner: Any, expected_account_id: int, username_raw: s
         return ClaimResult(ClaimOutcome.INVALID, str(exc))
 
     try:
-        if not runner.is_connected:
+        # Ensure client is connected safely without using missing attributes
+        if hasattr(runner, "connect") and callable(runner.connect):
             await runner.connect()
     except AccountUnavailable as exc:
         return ClaimResult(ClaimOutcome.ACCOUNT_UNAVAILABLE, f"The account is not connected ({exc}).")
@@ -130,7 +131,7 @@ async def change_username(runner: Any, expected_account_id: int, username_raw: s
             return ClaimResult(ClaimOutcome.NOT_MODIFIED, "Telegram reports the username is unchanged.")
         if "CHANNELS_ADMIN_PUBLIC_TOO_MUCH" in text:
             return ClaimResult(ClaimOutcome.REFUSED, "This account has too many public channels created. Free up one of its public channels.")
-        
+
         info = await runner.report_error("update_channel_username", exc)
         return ClaimResult(ClaimOutcome.REFUSED,
                            f"Telegram refused the change ({type(exc).__name__}; category {info.category.value}).")
