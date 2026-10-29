@@ -31,10 +31,10 @@ def main_menu() -> InlineKeyboardMarkup:
     return _kb([
         [("➕ Add Account", Nav(a="add")), ("📥 Import Session", Nav(a="import"))],
         [("👥 List Accounts", Nav(a="accts")), ("🗑 Remove Account", Nav(a="rm_list"))],
-        [("🎯 Monitor Username", Nav(a="mon")), ("⏹ Stop Monitoring", Nav(a="stop"))],
-        [("⚙️ Monitoring Settings", Nav(a="set")), ("⏳ FloodWait Notifications", Nav(a="flood"))],
+        [("🎯 Snipe Username", Nav(a="mon")), ("⏹ Stop Sniping", Nav(a="stop"))],
+        [("⚙️ Sniping Settings", Nav(a="set")), ("⏳ FloodWait Notifications", Nav(a="flood"))],
         [("🧾 View Logs", Nav(a="logs")), ("📊 System Status", Nav(a="status"))],
-        [("🔄 Restart Monitoring", Nav(a="restart"))],
+        [("🔄 Restart Sniping", Nav(a="restart"))],
     ])
 
 
@@ -58,7 +58,7 @@ def account_picker(views: List[Dict[str, Any]], action: str, with_home: bool = T
 
 
 def account_detail(account_id: int, *, can_reconnect: bool) -> InlineKeyboardMarkup:
-    rows: List[Row] = [[("🎯 Use for monitoring", Nav(a="usemon", v=str(account_id))),
+    rows: List[Row] = [[("🎯 Use for sniping", Nav(a="usemon", v=str(account_id))),
                         ("✏️ Set username…", Nav(a="claim_pick", v=str(account_id)))]]
     second: Row = []
     if can_reconnect:
@@ -78,12 +78,10 @@ def remove_choice(account_id: int) -> InlineKeyboardMarkup:
 
 
 def target_card(running: bool) -> InlineKeyboardMarkup:
-    toggle = ("⏹ Stop", Nav(a="stop")) if running else ("▶️ Start", Nav(a="start"))
     return _kb([
-        [toggle, ("🔄 Restart", Nav(a="restart"))],
-        [("📜 History", Nav(a="hist")), ("⚙️ Interval", Nav(a="set"))],
-        [("✏️ Set username on an account…", Nav(a="claim_pick"))],
-        [("🔃 Refresh", Nav(a="target")), ("🏠 Dashboard", Nav(a="home"))],
+        [("⏹ Stop Sniping", Nav(a="stop")), ("📜 History", Nav(a="hist"))],
+        [("⚙️ Gap Settings", Nav(a="set")), ("🔃 Refresh", Nav(a="target"))],
+        [("🏠 Dashboard", Nav(a="home"))],
     ])
 
 
@@ -92,7 +90,7 @@ def settings(current: int, account_views: List[Dict[str, Any]], selected: Option
                        [("✍️ Custom interval", Nav(a="iv_custom"))]]
     for v in account_views:
         tick = "✅ " if selected == v["id"] else ""
-        rows.append([(f"{tick}Monitor with {v['safe_id']}", Nav(a="usemon", v=str(v["id"])))])
+        rows.append([(f"{tick}Snipe with {v['safe_id']}", Nav(a="usemon", v=str(v["id"])))])
     rows.append([("🎯 Target card", Nav(a="target")), ("🏠 Dashboard", Nav(a="home"))])
     return _kb(rows)
 
@@ -119,5 +117,5 @@ def claim_confirm(account_id: int) -> InlineKeyboardMarkup:
 def availability_alert(username: str) -> InlineKeyboardMarkup:
     return _kb([
         [("✏️ Set it on one of my accounts…", Nav(a="claim_pick"))],
-        [("⏹ Stop monitoring", Nav(a="stop")), ("🎯 Status", Nav(a="target"))],
+        [("⏹ Stop sniping", Nav(a="stop")), ("🎯 Status", Nav(a="target"))],
     ])
