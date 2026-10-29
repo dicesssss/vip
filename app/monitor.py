@@ -1,6 +1,6 @@
 """Availability monitor: one background task, FloodWait-aware, restorable after restart.
 
-* Rotating accounts monitoring (up to 5 accounts with 10s gap).
+* Rotating accounts monitoring (up to 5 accounts with configured gap + random jitter).
 * Auto-claims the username on the account itself when available and reports elapsed time.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import html
 import logging
+import random
 import time
 from enum import Enum
 from typing import Any, Callable, Dict, Optional
@@ -57,7 +58,7 @@ class Monitor:
         return self._task is not None and not self._task.done()
 
     async def start(self) -> bool:
-        """Start monitoring the current target. Returns False if already running / no target."""
+        """Start sniping the current target automatically. Returns False if already running / no target."""
         if self.running:
             return False
         if await self.repo.get_current_target() is None:
@@ -81,7 +82,7 @@ class Monitor:
 
     async def resume_from_db(self) -> bool:
         if await self.repo.get_bool("monitoring_enabled") and await self.repo.get_current_target() is not None:
-            log.info("restoring monitoring from saved configuration")
+            log.info("restoring sniper from saved configuration")
             return await self.start()
         return False
 
@@ -103,10 +104,25 @@ class Monitor:
             await asyncio.wait_for(self._wake.wait(), timeout=max(0.0, delay))
 
     async def _pick_runners(self) -> list[Any]:
-        """Pick up to 5 connected, non-permanent accounts for rotation."""
+        """Pick connected accounts automatically for sequence rotation (up to 5 accounts)."""
+        # Check if user specifically locked a monitor account in settings
+        raw = await self.repo.get_setting("monitor_account_id")
+        selected_id = int(raw) if raw and raw.isdigit() else None
+
         runners = []
-        for runner in self.manager.all():
-            if not runner.permanent and runner.status is AccStatus.CONNECTED:
+        all_runners = self.manager.all()
+
+        if selected_id:
+            # If user selected a specific account, put it first if connected
+            for runner in all_runners:
+                if runner.account_id == selected_id and not runner.permanent and runner.status is AccStatus.CONNECTED:
+                    if runner.flood_remaining() <= 0:
+                        runners.append(runner)
+                    break
+
+        # Automatically fill up the rest of the sequence from available connected accounts
+        for runner in all_runners:
+            if runner not in runners and not runner.permanent and runner.status is AccStatus.CONNECTED:
                 if runner.flood_remaining() <= 0:
                     runners.append(runner)
             if len(runners) >= 5:
@@ -114,9 +130,9 @@ class Monitor:
         return runners
 
     async def _run(self) -> None:
-        log.info("monitor rotation loop started with 10s gap and auto-claim")
+        log.info("sniper rotation loop started with automatic sequence and human jitter")
         waiting_since: Optional[float] = None
-        start_wall_time = time.time()  # Track elapsed time to find the user
+        start_wall_time = time.time()  # Track elapsed time
 
         while True:
             try:
@@ -136,7 +152,10 @@ class Monitor:
                     continue
                 waiting_since = None
 
-                # Rotate through active runners (up to 5 accounts) with 10s gap
+                # Fetch configured interval gap from repo (default 30s or user setting)
+                base_interval = await self.repo.get_int("interval_seconds", 30)
+
+                # Rotate through active runners in sequence automatically
                 for index, runner in enumerate(runners):
                     target = await self.repo.get_current_target()
                     if target is None:
@@ -155,7 +174,7 @@ class Monitor:
                     await self._record(target, runner, result, elapsed_seconds)
 
                     if result.state is State.AVAILABLE:
-                        log.info(f"Username @{target['username']} secured! Stopping monitor.")
+                        log.info(f"Username @{target['username']} secured instantly! Stopping sniper.")
                         await self.repo.set_bool("monitoring_enabled", False)
                         self.status = MonitorStatus.STOPPED
                         return
@@ -164,17 +183,17 @@ class Monitor:
                         await self._stop_invalid(target)
                         return
 
-                    # Wait 10 seconds before checking with the next account in rotation
-                    if index < len(runners) - 1:
-                        await self._sleep_or_wake(10.0)
+                    # Add human-like random jitter (1 to 2 seconds extra) to the configured gap
+                    jitter = random.uniform(1.0, 2.0)
+                    delay = float(base_interval) + jitter
 
-                # End of 5-account batch cycle, small gap before next rotation cycle
-                await self._sleep_or_wake(10.0)
+                    # Wait before checking with the next account in sequence rotation
+                    await self._sleep_or_wake(delay)
 
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                log.exception("monitor iteration failed")
+                log.exception("sniper iteration failed")
                 await self._report_unexpected(exc)
                 await self._sleep_or_wake(10.0)
 
@@ -208,7 +227,7 @@ class Monitor:
             await self.repo.add_history(target["id"], result.state.value, result.detail[:300], runner.account_id)
 
         if became_available:
-            # AUTO-CLAIM ON SELF USING claim.py change_username function
+            # AUTO-CLAIM ON THE ACCOUNT IMMEDIATELY
             claim_success = False
             claim_msg = ""
             try:
@@ -233,11 +252,11 @@ class Monitor:
         status_text = f"✅ <b>Auto-Claim Result:</b> {html.escape(message)}" if claimed else f"⚠️ <b>Available, but claim issue:</b> {html.escape(message)}"
 
         text = (
-            f"🟢 <b>@{html.escape(username)} was AVAILABLE!</b>\n"
+            f"🟢 <b>@{html.escape(username)} was AVAILABLE and targeted!</b>\n"
             f"⏱️ <b>Time taken:</b> {time_str}\n"
             f"👤 <b>Account used:</b> {html.escape(str(account_label))}\n"
             f"{status_text}\n\n"
-            f"Checked at: {fmt_time(utcnow(), self.tz)}"
+            f"Secured at: {fmt_time(utcnow(), self.tz)}"
         )
         markup = self._markup(username) if self._markup else None
         await self.notifier.send(text, markup)
@@ -247,14 +266,14 @@ class Monitor:
         self.status = MonitorStatus.STOPPED
         info = ErrorInfo(Category.INVALID_USERNAME, f"Telegram rejected @{target['username']}")
         await self.notifier.notify_error(account_label=None, account_id=None, op="check_username", info=info,
-                                         status="monitoring stopped")
+                                         status="sniping stopped")
 
     async def _report_waiting(self, runner: Any) -> None:
-        reason = "no connected monitoring accounts available" if runner is None else (
-            f"monitoring account {runner.safe_id} is {runner.status.value}")
-        info = ErrorInfo(Category.CONNECTION, f"Monitoring paused: {reason}. Add or fix accounts.")
+        reason = "no connected accounts available for sequence rotation" if runner is None else (
+            f"account {runner.safe_id} is {runner.status.value}")
+        info = ErrorInfo(Category.CONNECTION, f"Sniping paused: {reason}. Add or fix accounts.")
         await self.notifier.notify_error(account_label=getattr(runner, "safe_id", None),
-                                         account_id=getattr(runner, "account_id", None), op="monitor",
+                                         account_id=getattr(runner, "account_id", None), op="sniper",
                                          status=self.status.value)
 
     async def _report_unexpected(self, exc: BaseException) -> None:
@@ -262,5 +281,5 @@ class Monitor:
 
         info = classify(exc)
         with contextlib.suppress(Exception):
-            await self.notifier.notify_error(account_label=None, account_id=None, op="monitor_loop",
+            await self.notifier.notify_error(account_label=None, account_id=None, op="sniper_loop",
                                              info=info, status=self.status.value)
