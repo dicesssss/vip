@@ -266,3 +266,4 @@ class Monitor:
         with contextlib.suppress(Exception):
             await self.notifier.notify_error(account_label=None, account_id=None, op="sniper_loop",
                                              info=info, status=self.status.value)
+ 
