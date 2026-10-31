@@ -1,6 +1,6 @@
 """Availability monitor: one background task, FloodWait-aware, restorable after restart.
 
-* Rotating accounts monitoring (up to 5 accounts with configured gap + random jitter).
+* Rotating accounts monitoring (all connected accounts with configured gap + random jitter).
 * Auto-claims the username on the account itself when available and reports elapsed time.
 """
 from __future__ import annotations
@@ -104,33 +104,16 @@ class Monitor:
             await asyncio.wait_for(self._wake.wait(), timeout=max(0.0, delay))
 
     async def _pick_runners(self) -> list[Any]:
-        """Pick connected accounts automatically for sequence rotation (up to 5 accounts)."""
-        # Check if user specifically locked a monitor account in settings
-        raw = await self.repo.get_setting("monitor_account_id")
-        selected_id = int(raw) if raw and raw.isdigit() else None
-
+        """Pick all connected, non-permanent accounts automatically for full sequence rotation."""
         runners = []
-        all_runners = self.manager.all()
-
-        if selected_id:
-            # If user selected a specific account, put it first if connected
-            for runner in all_runners:
-                if runner.account_id == selected_id and not runner.permanent and runner.status is AccStatus.CONNECTED:
-                    if runner.flood_remaining() <= 0:
-                        runners.append(runner)
-                    break
-
-        # Automatically fill up the rest of the sequence from available connected accounts
-        for runner in all_runners:
-            if runner not in runners and not runner.permanent and runner.status is AccStatus.CONNECTED:
+        for runner in self.manager.all():
+            if not runner.permanent and runner.status is AccStatus.CONNECTED:
                 if runner.flood_remaining() <= 0:
                     runners.append(runner)
-            if len(runners) >= 5:
-                break
         return runners
 
     async def _run(self) -> None:
-        log.info("sniper rotation loop started with automatic sequence and human jitter")
+        log.info("sniper rotation loop started with full sequence rotation and human jitter")
         waiting_since: Optional[float] = None
         start_wall_time = time.time()  # Track elapsed time
 
@@ -152,10 +135,10 @@ class Monitor:
                     continue
                 waiting_since = None
 
-                # Fetch configured interval gap from repo (default 30s or user setting)
+                # Fetch configured interval gap from repo (user selected seconds)
                 base_interval = await self.repo.get_int("interval_seconds", 30)
 
-                # Rotate through active runners in sequence automatically
+                # Rotate through all connected runners in sequence automatically
                 for index, runner in enumerate(runners):
                     target = await self.repo.get_current_target()
                     if target is None:
