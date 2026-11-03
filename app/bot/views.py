@@ -39,10 +39,9 @@ def account_line(view: Dict[str, Any], tz: Any = None) -> str:
 def account_list(views: List[Dict[str, Any]], tz: Any = None, monitor_account_id: Optional[int] = None) -> str:
     if not views:
         return "No accounts yet. Use <b>Add Account</b> or <b>Import Session</b>."
-    lines = ["👥 <b>Accounts</b>"]
+    lines = ["👥 <b>Accounts (Auto-Rotating Sequence)</b>"]
     for v in views:
-        mark = " 🎯 active" if monitor_account_id == v["id"] else ""
-        lines.append(account_line(v, tz) + mark)
+        lines.append(account_line(v, tz) + " 🔄 rotating")
     return "\n\n".join([lines[0], "\n\n".join(lines[1:])])
 
 
@@ -52,7 +51,7 @@ def account_detail(view: Dict[str, Any], tz: Any = None, is_monitor: bool = Fals
         f"Status: {ACCOUNT_ICON.get(view['status'], '⚪')} {e(view['status'])}",
         f"Phone: {e(view.get('phone_hint') or '—')}",
         f"Last connected: {fmt_time(view.get('last_connected_at'), tz)}",
-        f"Used for sniping: {'yes' if is_monitor else 'no'}",
+        f"Rotating in sequence: yes",
     ]
     if view.get("detail"):
         lines.append(f"Detail: {e(str(view['detail'])[:160])}")
@@ -70,8 +69,8 @@ def target_card(target: Optional[Dict[str, Any]], *, monitor_status: str, interv
         f"🎯 <b>@{e(target['username'])}</b>",
         f"Latest check: {STATE_ICON.get(state, '⚪')} {STATE_TEXT.get(state, state)}",
         f"Last confirmed: {e(target.get('confirmed_state') or '—')}",
-        f"Sniping Status: <b>{e(monitor_status)}</b> · every {interval}s",
-        f"Active Account: {e(account_label or 'none selected')}",
+        f"Sniping Status: <b>{e(monitor_status)}</b> · every {interval}s + 1-2s jitter",
+        f"Active Account: <b>All connected accounts rotating in sequence</b>",
         f"Last check: {fmt_time(target.get('last_check_at'), tz)}",
         f"Last success: {fmt_time(target.get('last_success_at'), tz)}",
         f"Checks run: {target.get('checks_total') or 0}",
@@ -79,7 +78,7 @@ def target_card(target: Optional[Dict[str, Any]], *, monitor_status: str, interv
     if target.get("last_error"):
         lines.append(f"Last error: <code>{e(str(target['last_error'])[:160])}</code>")
         lines.append(f"Error time: {fmt_time(target.get('last_error_at'), tz)}")
-    lines.append("\n<i>“Available” is a snapshot only; bot will auto-claim immediately when open.</i>")
+    lines.append("\n<i>“Available” is a snapshot only; bot will auto-claim immediately on open.</i>")
     return "\n".join(lines)
 
 
@@ -97,10 +96,10 @@ def history(rows: List[Dict[str, Any]], username: str, tz: Any = None) -> str:
 def settings(interval: int, min_i: int, max_i: int, account_label: Optional[str]) -> str:
     return (
         "⚙️ <b>Sniping settings</b>\n"
-        f"Current account rotation gap: <b>{interval} s</b>\n"
-        f"Active account: {e(account_label or 'none selected')}\n\n"
+        f"Current account rotation gap: <b>{interval} s + random jitter</b>\n"
+        f"Account Mode: <b>All connected accounts rotating in sequence automatically</b>\n\n"
         f"Allowed gap: {min_i}–{max_i} s. Telegram enforces its own limits (FloodWait); "
-        "bot rotates across your accounts maintaining this gap to check and snipe instantly upon availability."
+        "bot rotates across all your connected accounts maintaining this gap to check and snipe instantly upon availability."
     )
 
 
@@ -137,13 +136,13 @@ def stats_dashboard(*, uptime_seconds: float, counts: Dict[str, int], target: Op
         "━━━━━━━━━━━━━━━━━━━━━━",
         "📈 <b>Execution Metrics:</b>",
         f"  • Total Tries / Checks Run: <b>{total_checks}</b>",
-        f"  • Account Rotation Gap: <b>{interval}s</b>",
+        f"  • Account Rotation Gap: <b>{interval}s + human jitter</b>",
         f"  • Sniper Status: <b>{e(monitor_status)}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "👥 <b>Account Fleet Status:</b>",
         f"  • Total Accounts Loaded: <b>{counts['total']}</b>",
         f"  • Active & Connected: 🟢 <b>{counts['connected']}</b>",
-        f"  • Rotating / Available: 🔄 <b>{active_runners_count}</b>",
+        f"  • Rotating / Sequence: 🔄 <b>{active_runners_count}</b>",
         f"  • Disconnected: 🔴 <b>{counts['disconnected']}</b>",
         f"  • Permanently Failed: ⛔ <b>{counts.get('failed', 0)}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
@@ -165,7 +164,7 @@ def status(*, version: str, uptime_seconds: float, counts: Dict[str, int], targe
         f"Sessions: {counts['total']} total · {counts['connected']} connected · {counts['disconnected']} disconnected"
         + (f" · {counts['failed']} permanently failed" if counts.get("failed") else ""),
         f"Target: {('@' + e(target['username'])) if target else 'none'}",
-        f"Sniping: <b>{e(monitor_status)}</b> · every {interval}s · account {e(monitor_account or '—')}",
+        f"Sniping: <b>{e(monitor_status)}</b> · every {interval}s · accounts rotating in sequence",
         f"Last check: {fmt_time(last_check, tz)}",
         "",
         f"Storage: {storage_line} · {free // (1024 * 1024)} MiB free · volume <code>{e(volume_id)}</code>",
