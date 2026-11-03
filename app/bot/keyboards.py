@@ -58,8 +58,8 @@ def account_picker(views: List[Dict[str, Any]], action: str, with_home: bool = T
 
 
 def account_detail(account_id: int, *, can_reconnect: bool) -> InlineKeyboardMarkup:
-    rows: List[Row] = [[("🎯 Use for sniping", Nav(a="usemon", v=str(account_id))),
-                        ("✏️ Set username…", Nav(a="claim_pick", v=str(account_id)))]]
+    # Removed manual "Use for sniping" button to enforce automatic sequence rotation
+    rows: List[Row] = [[("✏️ Set username…", Nav(a="claim_pick", v=str(account_id)))]]
     second: Row = []
     if can_reconnect:
         second.append(("🔌 Reconnect", Nav(a="reconnect", v=str(account_id))))
@@ -86,12 +86,12 @@ def target_card(running: bool) -> InlineKeyboardMarkup:
 
 
 def settings(current: int, account_views: List[Dict[str, Any]], selected: Optional[int]) -> InlineKeyboardMarkup:
-    rows: List[Row] = [[((f"✅ {s}s" if s == current else f"{s}s"), Nav(a="iv", v=str(s))) for s in INTERVAL_CHOICES],
-                       [("✍️ Custom interval", Nav(a="iv_custom"))]]
-    for v in account_views:
-        tick = "✅ " if selected == v["id"] else ""
-        rows.append([(f"{tick}Snipe with {v['safe_id']}", Nav(a="usemon", v=str(v["id"])))])
-    rows.append([("🎯 Target card", Nav(a="target")), ("🏠 Dashboard", Nav(a="home"))])
+    # Clean settings menu: only interval choices, no individual account locking buttons
+    rows: List[Row] = [
+        [((f"✅ {s}s" if s == current else f"{s}s"), Nav(a="iv", v=str(s))) for s in INTERVAL_CHOICES],
+        [("✍️ Custom interval", Nav(a="iv_custom"))],
+        [("🎯 Target card", Nav(a="target")), ("🏠 Dashboard", Nav(a="home"))]
+    ]
     return _kb(rows)
 
 
