@@ -36,7 +36,6 @@ def register(router: Router, ctx: AppContext) -> None:
             tgt, monitor_status=ctx.monitor.status.value,
             interval=await ctx.repo.get_int("interval_seconds", 30),
             account_label=await monitor_account_label(ctx), tz=tz)
-        # Removed manual start button logic, keeping clean views
         await show(target, text, kb.home_only() if not tgt else kb.refresh("target"))
 
     async def _register_target(target, raw: str) -> None:
@@ -50,11 +49,11 @@ def register(router: Router, ctx: AppContext) -> None:
         warn = ""
         if not ctx.manager.all():
             warn = "\n\n⚠️ No account is connected yet. Add one first; monitoring waits for it."
-        
+
         # AUTOMATICALLY START MONITORING IMMEDIATELY UPON /SNIPE
         started = await ctx.monitor.restart() if ctx.monitor.running else await ctx.monitor.start()
         ctx.monitor.wake()
-        
+
         prefix = f"✅ Registered and automatically started monitoring <b>@{username}</b>!{warn}\n\n"
         tgt = await ctx.repo.get_target(row["id"])
         text = prefix + views.target_card(
@@ -93,7 +92,7 @@ def register(router: Router, ctx: AppContext) -> None:
     async def cmd_target(message: Message) -> None:
         await _target_view(message)
 
-    # ------------------------------------------------------------------ controls (Manual start/restart removed)
+    # ------------------------------------------------------------------ controls
     @router.callback_query(Nav.filter(F.a == "stop"))
     async def cb_stop(cb: CallbackQuery) -> None:
         await ctx.monitor.stop()
@@ -150,13 +149,3 @@ def register(router: Router, ctx: AppContext) -> None:
         await ctx.repo.set_setting("interval_seconds", str(value))
         ctx.monitor.wake()
         await _settings_view(message)
-
-    @router.callback_query(Nav.filter(F.a == "usemon"))
-    async def cb_use_for_monitoring(cb: CallbackQuery, callback_data: Nav) -> None:
-        runner = ctx.manager.get(int(callback_data.v))
-        if runner is None or runner.permanent:
-            await cb.answer("That account cannot be used.", show_alert=True)
-            return
-        await ctx.repo.set_setting("monitor_account_id", str(runner.account_id))
-        ctx.monitor.wake()
-        await _settings_view(cb)
