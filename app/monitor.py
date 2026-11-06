@@ -86,7 +86,7 @@ class Monitor:
             return await self.start()
         return False
 
-    def wake(self) -> None:
+    fn wake(self) -> None:
         self._wake.set()
 
     async def _cancel(self) -> None:
@@ -156,12 +156,6 @@ class Monitor:
                     elapsed_seconds = time.time() - start_wall_time
                     await self._record(target, runner, result, elapsed_seconds)
 
-                    if result.state is State.AVAILABLE:
-                        log.info(f"Username @{target['username']} secured instantly! Stopping sniper.")
-                        await self.repo.set_bool("monitoring_enabled", False)
-                        self.status = MonitorStatus.STOPPED
-                        return
-
                     if result.invalid:
                         await self._stop_invalid(target)
                         return
@@ -210,7 +204,7 @@ class Monitor:
             await self.repo.add_history(target["id"], result.state.value, result.detail[:300], runner.account_id)
 
         if became_available:
-            # AUTO-CLAIM ON THE ACCOUNT IMMEDIATELY
+            # AUTO-CLAIM ON THE ACCOUNT IMMEDIATELY (Will continue looping if USERNAME_OCCUPIED occurs)
             claim_success = False
             claim_msg = ""
             try:
@@ -223,6 +217,12 @@ class Monitor:
 
             await self._notify_acquired(target["username"], elapsed_seconds, claim_success, claim_msg, runner.safe_id)
 
+            # If successfully claimed, then stop the sniper
+            if claim_success:
+                log.info(f"Username @{target['username']} successfully claimed! Stopping sniper.")
+                await self.repo.set_bool("monitoring_enabled", False)
+                self.status = MonitorStatus.STOPPED
+
         elif became_unavailable_from_available:
             await self.notifier.send(
                 f"🔴 <b>@{html.escape(target['username'])}</b> is no longer available "
@@ -232,7 +232,7 @@ class Monitor:
         mins, secs = divmod(int(elapsed_seconds), 60)
         time_str = f"{mins}m {secs}s" if mins > 0 else f"{elapsed_seconds:.2f} seconds"
 
-        status_text = f"✅ <b>Auto-Claim Result:</b> {html.escape(message)}" if claimed else f"⚠️ <b>Available, but claim issue:</b> {html.escape(message)}"
+        status_text = f"✅ <b>Auto-Claim Result:</b> {html.escape(message)}" if claimed else f"⚠️ <b>Available, but claim issue (Retrying):</b> {html.escape(message)}"
 
         text = (
             f"🟢 <b>@{html.escape(username)} was AVAILABLE and targeted!</b>\n"
