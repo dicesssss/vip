@@ -86,7 +86,7 @@ class Monitor:
             return await self.start()
         return False
 
-    fn wake(self) -> None:
+    def wake(self) -> None:
         self._wake.set()
 
     async def _cancel(self) -> None:
