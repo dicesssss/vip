@@ -107,6 +107,13 @@ class Repo:
         )
         row = await self.db.fetchone("SELECT * FROM targets WHERE username=?", (username,))
         assert row is not None
+        
+        # FRESH START: Reset checks and stats whenever a target is registered/re-selected
+        await self.db.execute(
+            "UPDATE targets SET state='unknown', confirmed_state=NULL, checks_total=0, last_error=NULL, last_check_at=NULL WHERE id=?",
+            (row["id"],)
+        )
+        row = await self.db.fetchone("SELECT * FROM targets WHERE id=?", (row["id"],))
         return row
 
     async def get_target(self, target_id: int) -> Optional[Dict[str, Any]]:
