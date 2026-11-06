@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -20,6 +21,9 @@ from .context import AppContext
 from .keyboards import Nav
 
 log = logging.getLogger(__name__)
+
+# Track bot start time for uptime calculation in /stats
+_BOT_START_TIME = time.monotonic()
 
 
 class MonitorInput(StatesGroup):
@@ -50,7 +54,7 @@ def register(router: Router, ctx: AppContext) -> None:
         if not ctx.manager.all():
             warn = "\n\n⚠️ No account is connected yet. Add one first; monitoring waits for it."
 
-        # AUTOMATICALLY START MONITORING IMMEDIATELY UPON /SNIPE
+        # AUTOMATICALLY START MONITORING IMMEDIATELY UPON /SNIPE (Stats are freshly reset in repo.py)
         started = await ctx.monitor.restart() if ctx.monitor.running else await ctx.monitor.start()
         ctx.monitor.wake()
 
@@ -91,6 +95,43 @@ def register(router: Router, ctx: AppContext) -> None:
     @router.message(Command("target"))
     async def cmd_target(message: Message) -> None:
         await _target_view(message)
+
+    # ------------------------------------------------------------------ /stats
+    async def _send_stats(target) -> None:
+        uptime_seconds = time.monotonic() - _BOT_START_TIME
+        all_accs = ctx.manager.all()
+        connected_count = sum(1 for r in all_accs if r.status.value == "connected")
+        disconnected_count = sum(1 for r in all_accs if r.status.value == "disconnected")
+        failed_count = sum(1 for r in all_accs if r.permanent)
+        rotating_count = sum(1 for r in all_accs if not r.permanent and r.status.value == "connected" and r.flood_remaining() <= 0)
+
+        counts = {
+            "total": len(all_accs),
+            "connected": connected_count,
+            "disconnected": disconnected_count,
+            "failed": failed_count,
+        }
+        target_obj = await ctx.repo.get_current_target()
+        interval = await ctx.repo.get_int("interval_seconds", 30)
+
+        text = views.stats_dashboard(
+            uptime_seconds=uptime_seconds,
+            counts=counts,
+            target=target_obj,
+            monitor_status=ctx.monitor.status.value,
+            interval=interval,
+            active_runners_count=rotating_count,
+            tz=tz
+        )
+        await show(target, text, kb.home_only())
+
+    @router.message(Command("stats"))
+    async def cmd_stats(message: Message) -> None:
+        await _send_stats(message)
+
+    @router.callback_query(Nav.filter(F.a == "stats"))
+    async def cb_stats(cb: CallbackQuery) -> None:
+        await _send_stats(cb)
 
     # ------------------------------------------------------------------ controls
     @router.callback_query(Nav.filter(F.a == "stop"))
